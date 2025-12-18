@@ -102,17 +102,27 @@ export function CreateSecretForm() {
         const { ciphertext, iv } = await encrypt(message, key);
         encryptedPayload = packEncrypted(iv, ciphertext);
       } else if (secretType === "files") {
-        // For demo, encrypt file names as manifest
-        const manifest = JSON.stringify(files.map(f => ({ name: f.name, size: f.size, type: f.type })));
+        // Encrypt files with their data as base64
+        const filesWithData = await Promise.all(
+          files.map(async (f) => {
+            const arrayBuffer = await f.arrayBuffer();
+            const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+            return { name: f.name, size: f.size, type: f.type, data: base64 };
+          })
+        );
+        const manifest = JSON.stringify(filesWithData);
         const { ciphertext, iv } = await encrypt(manifest, key);
         encryptedPayload = packEncrypted(iv, ciphertext);
       } else if (secretType === "voice") {
+        // Encrypt voice as base64
         const arrayBuffer = await voiceBlob!.arrayBuffer();
-        const { ciphertext, iv } = await encrypt(arrayBuffer, key);
+        const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+        const voiceData = JSON.stringify({ audio: base64, type: voiceBlob!.type });
+        const { ciphertext, iv } = await encrypt(voiceData, key);
         encryptedPayload = packEncrypted(iv, ciphertext);
       } else {
         // Chat invite
-        const chatManifest = JSON.stringify({ type: "chat", created: Date.now() });
+        const chatManifest = JSON.stringify({ type: "chat", roomId: secretId, created: Date.now() });
         const { ciphertext, iv } = await encrypt(chatManifest, key);
         encryptedPayload = packEncrypted(iv, ciphertext);
       }

@@ -109,24 +109,21 @@ export function VoiceRecorder({ voiceBlob, setVoiceBlob }: VoiceRecorderProps) {
     <div className="space-y-4">
       {!voiceBlob ? (
         <div className="flex flex-col items-center py-8">
-          <button
+          <Button
+            type="button"
             onClick={isRecording ? stopRecording : startRecording}
+            variant={isRecording ? "destructive" : "ember"}
             className={cn(
               "relative w-24 h-24 rounded-full transition-all duration-300",
-              isRecording
-                ? "bg-destructive hover:bg-destructive/90"
-                : "bg-primary hover:bg-primary/90 shadow-ember"
+              isRecording && "animate-pulse"
             )}
           >
             {isRecording ? (
-              <Square className="w-8 h-8 mx-auto text-destructive-foreground" />
+              <Square className="w-8 h-8" />
             ) : (
-              <Mic className="w-8 h-8 mx-auto text-primary-foreground" />
+              <Mic className="w-8 h-8" />
             )}
-            {isRecording && (
-              <span className="absolute inset-0 rounded-full animate-ping bg-destructive/50" />
-            )}
-          </button>
+          </Button>
           
           <p className="mt-4 text-lg font-mono">
             {isRecording ? formatTime(duration) : "0:00"}
