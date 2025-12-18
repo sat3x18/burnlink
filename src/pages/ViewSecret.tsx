@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useParams, useLocation } from "react-router-dom";
 import { BurnLinkLogo } from "@/components/BurnLinkLogo";
 import { EmberParticles } from "@/components/EmberParticles";
@@ -16,7 +16,15 @@ import {
   Mic,
   Copy,
   Download,
-  Check
+  Check,
+  Play,
+  Pause,
+  FileIcon,
+  ImageIcon,
+  VideoIcon,
+  FileTextIcon,
+  Send,
+  MessageCircle
 } from "lucide-react";
 import { importKey, decryptToString, unpackEncrypted } from "@/lib/crypto";
 import { useToast } from "@/hooks/use-toast";
@@ -36,17 +44,43 @@ interface SecretData {
   createdAt: number;
 }
 
+interface FileData {
+  name: string;
+  size: number;
+  type: string;
+  data: string;
+}
+
+interface VoiceData {
+  audio: string;
+  type: string;
+}
+
+interface ChatMessage {
+  id: string;
+  text: string;
+  sender: string;
+  timestamp: number;
+}
+
 export default function ViewSecret() {
   const { secretId } = useParams();
   const location = useLocation();
   const [status, setStatus] = useState<SecretStatus>("loading");
   const [secret, setSecret] = useState<SecretData | null>(null);
   const [decryptedContent, setDecryptedContent] = useState<string | null>(null);
+  const [decryptedFiles, setDecryptedFiles] = useState<FileData[]>([]);
+  const [decryptedVoice, setDecryptedVoice] = useState<VoiceData | null>(null);
   const [password, setPassword] = useState("");
   const [passwordRequired, setPasswordRequired] = useState(false);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [isBurning, setIsBurning] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [nickname] = useState(() => `User${Math.floor(Math.random() * 9999)}`);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const { toast } = useToast();
 
   // Get key from URL fragment (never sent to server)
@@ -136,7 +170,20 @@ export default function ViewSecret() {
       const { iv, ciphertext } = unpackEncrypted(secret.encryptedPayload);
       const decrypted = await decryptToString(ciphertext, key, iv);
       
-      setDecryptedContent(decrypted);
+      // Handle different content types
+      if (secret.type === "message") {
+        setDecryptedContent(decrypted);
+      } else if (secret.type === "files") {
+        const filesData: FileData[] = JSON.parse(decrypted);
+        setDecryptedFiles(filesData);
+      } else if (secret.type === "voice") {
+        const voiceData: VoiceData = JSON.parse(decrypted);
+        setDecryptedVoice(voiceData);
+      } else if (secret.type === "chat") {
+        // Initialize chat
+        setDecryptedContent(decrypted);
+      }
+      
       setStatus("revealed");
 
       // Update view count (demo)
@@ -164,6 +211,9 @@ export default function ViewSecret() {
 
   const handleDestroy = () => {
     setIsBurning(true);
+    if (audioRef.current) {
+      audioRef.current.pause();
+    }
     setTimeout(() => {
       localStorage.removeItem(`burnlink_${secretId}`);
       setStatus("destroyed");
@@ -179,11 +229,79 @@ export default function ViewSecret() {
     }
   };
 
+  const handleDownloadFile = (file: FileData) => {
+    const binary = atob(file.data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    const blob = new Blob([bytes], { type: file.type });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = file.name;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDownloadAll = () => {
+    decryptedFiles.forEach((file) => handleDownloadFile(file));
+  };
+
+  const playVoice = () => {
+    if (!decryptedVoice) return;
+    
+    if (isPlaying && audioRef.current) {
+      audioRef.current.pause();
+      setIsPlaying(false);
+      return;
+    }
+
+    const binary = atob(decryptedVoice.audio);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    const blob = new Blob([bytes], { type: decryptedVoice.type });
+    const url = URL.createObjectURL(blob);
+    
+    audioRef.current = new Audio(url);
+    audioRef.current.onended = () => setIsPlaying(false);
+    audioRef.current.play();
+    setIsPlaying(true);
+  };
+
+  const sendChatMessage = () => {
+    if (!chatInput.trim()) return;
+    
+    const newMessage: ChatMessage = {
+      id: Math.random().toString(36).substr(2, 9),
+      text: chatInput,
+      sender: nickname,
+      timestamp: Date.now(),
+    };
+    
+    setChatMessages((prev) => [...prev, newMessage]);
+    setChatInput("");
+  };
+
+  const getFileIcon = (type: string) => {
+    if (type.startsWith("image/")) return ImageIcon;
+    if (type.startsWith("video/")) return VideoIcon;
+    if (type.startsWith("text/") || type.includes("document")) return FileTextIcon;
+    return FileIcon;
+  };
+
+  const isPreviewable = (type: string) => {
+    return type.startsWith("image/") || type.startsWith("video/");
+  };
+
   const getTypeIcon = () => {
     switch (secret?.type) {
       case "message": return MessageSquare;
       case "files": return FileUp;
       case "voice": return Mic;
+      case "chat": return MessageCircle;
       default: return MessageSquare;
     }
   };
@@ -200,6 +318,12 @@ export default function ViewSecret() {
     if (hours > 24) return `${Math.floor(hours / 24)} days`;
     if (hours > 0) return `${hours}h ${minutes}m`;
     return `${minutes} minutes`;
+  };
+
+  const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
   const TypeIcon = getTypeIcon();
@@ -272,7 +396,7 @@ export default function ViewSecret() {
                 </div>
                 <h1 className="text-2xl font-bold mb-2">Someone sent you a secret</h1>
                 <p className="text-muted-foreground">
-                  This {secret.type === "voice" ? "voice note" : secret.type} will self-destruct after viewing.
+                  This {secret.type === "voice" ? "voice note" : secret.type === "chat" ? "chat room" : secret.type} will self-destruct after viewing.
                 </p>
               </div>
 
@@ -340,7 +464,8 @@ export default function ViewSecret() {
             </div>
           )}
 
-          {status === "revealed" && decryptedContent && (
+          {/* Revealed Message */}
+          {status === "revealed" && secret?.type === "message" && decryptedContent && (
             <div className="glass-card rounded-xl p-8 space-y-6">
               {countdown !== null && (
                 <div className="text-center p-3 rounded-lg bg-destructive/20 border border-destructive/30">
@@ -385,6 +510,206 @@ export default function ViewSecret() {
               >
                 <Flame className="w-4 h-4" />
                 Destroy Now
+              </Button>
+            </div>
+          )}
+
+          {/* Revealed Files */}
+          {status === "revealed" && secret?.type === "files" && decryptedFiles.length > 0 && (
+            <div className="glass-card rounded-xl p-8 space-y-6">
+              {countdown !== null && (
+                <div className="text-center p-3 rounded-lg bg-destructive/20 border border-destructive/30">
+                  <p className="text-sm text-destructive">
+                    Auto-destroying in <span className="font-bold">{countdown}</span> seconds
+                  </p>
+                </div>
+              )}
+
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <Label className="text-sm text-muted-foreground">
+                    {decryptedFiles.length} file{decryptedFiles.length > 1 ? "s" : ""} decrypted
+                  </Label>
+                  {decryptedFiles.length > 1 && (
+                    <Button variant="ghost" size="sm" onClick={handleDownloadAll}>
+                      <Download className="w-4 h-4" />
+                      Download All
+                    </Button>
+                  )}
+                </div>
+
+                <div className="space-y-3">
+                  {decryptedFiles.map((file, index) => {
+                    const FileIconComponent = getFileIcon(file.type);
+                    const previewUrl = isPreviewable(file.type)
+                      ? `data:${file.type};base64,${file.data}`
+                      : null;
+
+                    return (
+                      <div key={index} className="rounded-lg border border-border/50 overflow-hidden bg-background/50">
+                        {/* Preview for images/videos */}
+                        {previewUrl && file.type.startsWith("image/") && (
+                          <div className="w-full max-h-64 overflow-hidden">
+                            <img
+                              src={previewUrl}
+                              alt={file.name}
+                              className="w-full h-full object-contain bg-black/20"
+                            />
+                          </div>
+                        )}
+                        {previewUrl && file.type.startsWith("video/") && (
+                          <div className="w-full">
+                            <video
+                              src={previewUrl}
+                              controls
+                              className="w-full max-h-64"
+                            />
+                          </div>
+                        )}
+
+                        <div className="p-3 flex items-center gap-3">
+                          <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+                            <FileIconComponent className="w-5 h-5 text-primary" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-medium truncate">{file.name}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {formatFileSize(file.size)}
+                            </p>
+                          </div>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleDownloadFile(file)}
+                          >
+                            <Download className="w-4 h-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <Button
+                onClick={handleDestroy}
+                variant="destructive"
+                size="lg"
+                className="w-full"
+              >
+                <Flame className="w-4 h-4" />
+                Destroy Now
+              </Button>
+            </div>
+          )}
+
+          {/* Revealed Voice Note */}
+          {status === "revealed" && secret?.type === "voice" && decryptedVoice && (
+            <div className="glass-card rounded-xl p-8 space-y-6">
+              {countdown !== null && (
+                <div className="text-center p-3 rounded-lg bg-destructive/20 border border-destructive/30">
+                  <p className="text-sm text-destructive">
+                    Auto-destroying in <span className="font-bold">{countdown}</span> seconds
+                  </p>
+                </div>
+              )}
+
+              <div className="space-y-4">
+                <Label className="text-sm text-muted-foreground">Voice Note</Label>
+
+                <div className="flex flex-col items-center py-8 space-y-4">
+                  <button
+                    onClick={playVoice}
+                    className="w-20 h-20 rounded-full bg-primary hover:bg-primary/90 shadow-ember flex items-center justify-center transition-all"
+                  >
+                    {isPlaying ? (
+                      <Pause className="w-8 h-8 text-primary-foreground" />
+                    ) : (
+                      <Play className="w-8 h-8 text-primary-foreground ml-1" />
+                    )}
+                  </button>
+                  <p className="text-sm text-muted-foreground">
+                    {isPlaying ? "Playing..." : "Click to play"}
+                  </p>
+                </div>
+              </div>
+
+              <Button
+                onClick={handleDestroy}
+                variant="destructive"
+                size="lg"
+                className="w-full"
+              >
+                <Flame className="w-4 h-4" />
+                Destroy Now
+              </Button>
+            </div>
+          )}
+
+          {/* Chat Room */}
+          {status === "revealed" && secret?.type === "chat" && (
+            <div className="glass-card rounded-xl p-6 space-y-4 max-w-lg w-full">
+              {countdown !== null && (
+                <div className="text-center p-3 rounded-lg bg-destructive/20 border border-destructive/30">
+                  <p className="text-sm text-destructive">
+                    Room closes in <span className="font-bold">{countdown}</span> seconds
+                  </p>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between border-b border-border/50 pb-3">
+                <div>
+                  <h3 className="font-semibold">Ephemeral Chat</h3>
+                  <p className="text-xs text-muted-foreground">Messages are E2E encrypted</p>
+                </div>
+                <div className="text-xs text-muted-foreground bg-background/50 px-2 py-1 rounded">
+                  {nickname}
+                </div>
+              </div>
+
+              <div className="h-64 overflow-y-auto space-y-3 p-2 bg-background/30 rounded-lg">
+                {chatMessages.length === 0 ? (
+                  <div className="h-full flex items-center justify-center text-muted-foreground text-sm">
+                    No messages yet. Start the conversation!
+                  </div>
+                ) : (
+                  chatMessages.map((msg) => (
+                    <div
+                      key={msg.id}
+                      className={`p-3 rounded-lg max-w-[80%] ${
+                        msg.sender === nickname
+                          ? "ml-auto bg-primary text-primary-foreground"
+                          : "bg-muted"
+                      }`}
+                    >
+                      <p className="text-xs opacity-70 mb-1">{msg.sender}</p>
+                      <p className="text-sm">{msg.text}</p>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="flex gap-2">
+                <Input
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && sendChatMessage()}
+                  placeholder="Type a message..."
+                  className="bg-background/50"
+                />
+                <Button onClick={sendChatMessage} variant="ember" size="icon">
+                  <Send className="w-4 h-4" />
+                </Button>
+              </div>
+
+              <Button
+                onClick={handleDestroy}
+                variant="destructive"
+                size="lg"
+                className="w-full"
+              >
+                <Flame className="w-4 h-4" />
+                End & Destroy Chat
               </Button>
             </div>
           )}
