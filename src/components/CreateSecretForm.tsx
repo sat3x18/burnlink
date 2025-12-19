@@ -12,6 +12,7 @@ import { VoiceRecorder } from "./VoiceRecorder";
 import { SecretLinkDisplay } from "./SecretLinkDisplay";
 import { generateKey, exportKey, encrypt, packEncrypted, generateSecureId } from "@/lib/crypto";
 import { useToast } from "@/hooks/use-toast";
+import { supabase } from "@/integrations/supabase/client";
 
 type SecretType = "message" | "files" | "voice" | "chat";
 
@@ -151,25 +152,26 @@ export function CreateSecretForm() {
         ? Math.max(2, options.viewLimit) 
         : options.viewLimit;
 
-      // In production, this would be sent to the server
-      // For now, we'll simulate with local storage (demo only)
-      const secretData = {
+      // Store encrypted data in database
+      const { error } = await supabase.from('secrets').insert({
         id: secretId,
         type: secretType,
-        encryptedPayload,
+        encrypted_payload: encryptedPayload,
         expiration: options.expiration,
-        viewLimit: effectiveViewLimit,
-        viewCount: 0,
-        participants: [] as string[], // Track chat participants
-        hasPassword: !!options.password,
-        requireClick: options.requireClick,
-        destroyAfterSeconds: options.destroyAfterSeconds,
-        createdAt: Date.now(),
-        destroyVotes: [] as string[], // For consensus-based destruction
-      };
+        view_limit: effectiveViewLimit,
+        view_count: 0,
+        participants: [],
+        has_password: !!options.password,
+        require_click: options.requireClick,
+        destroy_after_seconds: options.destroyAfterSeconds,
+        created_at: Date.now(),
+        destroy_votes: [],
+      });
 
-      // Store encrypted data (demo - would be API call)
-      localStorage.setItem(`burnlink_${secretId}`, JSON.stringify(secretData));
+      if (error) {
+        console.error("Database error:", error);
+        throw new Error("Failed to store secret");
+      }
 
       // Generate link with key in fragment (never sent to server)
       const link = `${window.location.origin}/view/${secretId}#${keyString}`;

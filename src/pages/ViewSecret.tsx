@@ -30,22 +30,24 @@ import {
 } from "lucide-react";
 import { importKey, decryptToString, unpackEncrypted } from "@/lib/crypto";
 import { useToast } from "@/hooks/use-toast";
+import { supabase } from "@/integrations/supabase/client";
 
 type SecretStatus = "loading" | "ready" | "revealed" | "destroyed" | "expired" | "not-found" | "chat-full" | "name-entry";
 
 interface SecretData {
   id: string;
   type: "message" | "files" | "voice" | "chat";
-  encryptedPayload: string;
+  encrypted_payload: string;
   expiration: string;
-  viewLimit: number;
-  viewCount: number;
-  participants?: string[];
-  hasPassword: boolean;
-  requireClick: boolean;
-  destroyAfterSeconds: number | null;
-  createdAt: number;
-  destroyVotes?: string[];
+  view_limit: number;
+  view_count: number;
+  participants: string[];
+  has_password: boolean;
+  require_click: boolean;
+  destroy_after_seconds: number | null;
+  created_at: number;
+  destroy_votes: string[];
+  destroyed_at: number | null;
 }
 
 interface FileData {
@@ -62,10 +64,10 @@ interface VoiceData {
 
 interface ChatMessage {
   id: string;
-visibleId: string;
+  visible_id: string;
   text: string;
   sender: string;
-  senderName: string;
+  sender_name: string;
   timestamp: number;
 }
 
@@ -143,50 +145,76 @@ export default function ViewSecret() {
       return;
     }
 
-    // Demo: Load from localStorage (would be API call)
-    const storedData = localStorage.getItem(`burnlink_${secretId}`);
-    
-    if (!storedData) {
-      setStatus("not-found");
-      return;
-    }
-
     try {
-      const data: SecretData = JSON.parse(storedData);
+      // Load from database
+      const { data, error } = await supabase
+        .from('secrets')
+        .select('*')
+        .eq('id', secretId)
+        .maybeSingle();
+      
+      if (error || !data) {
+        setStatus("not-found");
+        return;
+      }
+
+      // Cast the data to our interface
+      const secretData: SecretData = {
+        id: data.id,
+        type: data.type as SecretData['type'],
+        encrypted_payload: data.encrypted_payload,
+        expiration: data.expiration,
+        view_limit: data.view_limit,
+        view_count: data.view_count,
+        participants: data.participants || [],
+        has_password: data.has_password,
+        require_click: data.require_click,
+        destroy_after_seconds: data.destroy_after_seconds,
+        created_at: data.created_at,
+        destroy_votes: data.destroy_votes || [],
+        destroyed_at: data.destroyed_at,
+      };
+
+      // Check if already destroyed
+      if (secretData.destroyed_at) {
+        setStatus("destroyed");
+        return;
+      }
       
       // Check expiration first
-      const expirationMs = parseExpiration(data.expiration);
-      if (Date.now() > data.createdAt + expirationMs) {
+      const expirationMs = parseExpiration(secretData.expiration);
+      if (Date.now() > secretData.created_at + expirationMs) {
         setStatus("expired");
-        localStorage.removeItem(`burnlink_${secretId}`);
+        // Delete expired secret
+        await supabase.from('secrets').delete().eq('id', secretId);
         return;
       }
 
       // For chat, check if already a participant or if room is full
-      if (data.type === "chat") {
-        const participants = data.participants || [];
+      if (secretData.type === "chat") {
+        const participants = secretData.participants || [];
         const isExistingParticipant = participants.includes(participantId);
         
-        if (!isExistingParticipant && participants.length >= data.viewLimit) {
+        if (!isExistingParticipant && participants.length >= secretData.view_limit) {
           setStatus("chat-full");
           return;
         }
       } else {
         // For non-chat secrets, check view limit
-        if (data.viewCount >= data.viewLimit) {
+        if (secretData.view_count >= secretData.view_limit) {
           setStatus("destroyed");
           return;
         }
       }
 
-      setSecret(data);
+      setSecret(secretData);
       
-      if (data.hasPassword) {
+      if (secretData.has_password) {
         setPasswordRequired(true);
       }
       
       // For chat, show name entry first
-      if (data.type === "chat") {
+      if (secretData.type === "chat") {
         setStatus("name-entry");
       } else {
         setStatus("ready");
@@ -209,39 +237,58 @@ export default function ViewSecret() {
     return parseInt(num) * (multipliers[unit] || 3600000);
   };
 
-  const joinChat = () => {
-    if (!secret) return;
+  const joinChat = async () => {
+    if (!secret || !secretId) return;
     
-    // Re-fetch latest data to check current state
-    const storedData = localStorage.getItem(`burnlink_${secretId}`);
-    if (!storedData) {
-      setStatus("not-found");
-      return;
-    }
-
-    const data: SecretData = JSON.parse(storedData);
-    const participants = data.participants || [];
-    
-    // Check if already a participant
-    if (!participants.includes(participantId)) {
-      // Check if room is full
-      if (participants.length >= data.viewLimit) {
-        setStatus("chat-full");
+    try {
+      // Re-fetch latest data to check current state
+      const { data, error } = await supabase
+        .from('secrets')
+        .select('*')
+        .eq('id', secretId)
+        .maybeSingle();
+      
+      if (error || !data) {
+        setStatus("not-found");
         return;
       }
+
+      const participants = data.participants || [];
       
-      // Add as participant
-      const updatedParticipants = [...participants, participantId];
-      const updatedData = { 
-        ...data, 
-        participants: updatedParticipants,
-        viewCount: updatedParticipants.length 
-      };
-      localStorage.setItem(`burnlink_${secretId}`, JSON.stringify(updatedData));
-      setSecret(updatedData);
+      // Check if already a participant
+      if (!participants.includes(participantId)) {
+        // Check if room is full
+        if (participants.length >= data.view_limit) {
+          setStatus("chat-full");
+          return;
+        }
+        
+        // Add as participant
+        const updatedParticipants = [...participants, participantId];
+        const { error: updateError } = await supabase
+          .from('secrets')
+          .update({ 
+            participants: updatedParticipants,
+            view_count: updatedParticipants.length 
+          })
+          .eq('id', secretId);
+        
+        if (updateError) {
+          console.error("Error joining chat:", updateError);
+          return;
+        }
+        
+        setSecret({
+          ...secret,
+          participants: updatedParticipants,
+          view_count: updatedParticipants.length
+        });
+      }
+      
+      setStatus("ready");
+    } catch (error) {
+      console.error("Error joining chat:", error);
     }
-    
-    setStatus("ready");
   };
 
   const handleReveal = async () => {
@@ -256,7 +303,7 @@ export default function ViewSecret() {
 
     try {
       const key = await importKey(keyString);
-      const { iv, ciphertext } = unpackEncrypted(secret.encryptedPayload);
+      const { iv, ciphertext } = unpackEncrypted(secret.encrypted_payload);
       const decrypted = await decryptToString(ciphertext, key, iv);
       
       // Handle different content types
@@ -282,8 +329,8 @@ export default function ViewSecret() {
       setStatus("revealed");
 
       // Start destruction countdown if configured (non-chat only)
-      if (secret.type !== "chat" && secret.destroyAfterSeconds) {
-        setCountdown(secret.destroyAfterSeconds);
+      if (secret.type !== "chat" && secret.destroy_after_seconds) {
+        setCountdown(secret.destroy_after_seconds);
       }
     } catch (error) {
       console.error("Decryption error:", error);
@@ -295,19 +342,27 @@ export default function ViewSecret() {
     }
   };
 
-  const incrementViewCount = () => {
+  const incrementViewCount = async () => {
     if (!secret || !secretId) return;
     
-    const storedData = localStorage.getItem(`burnlink_${secretId}`);
-    if (!storedData) return;
-    
-    const data: SecretData = JSON.parse(storedData);
-    const updatedSecret = { ...data, viewCount: data.viewCount + 1 };
-    localStorage.setItem(`burnlink_${secretId}`, JSON.stringify(updatedSecret));
-    
-    // If last view, schedule destruction
-    if (updatedSecret.viewCount >= secret.viewLimit) {
-      setTimeout(() => handleDestroy(), 30000); // 30 seconds to read
+    try {
+      const newViewCount = secret.view_count + 1;
+      const { error } = await supabase
+        .from('secrets')
+        .update({ view_count: newViewCount })
+        .eq('id', secretId);
+      
+      if (error) {
+        console.error("Error updating view count:", error);
+        return;
+      }
+      
+      // If last view, schedule destruction
+      if (newViewCount >= secret.view_limit) {
+        setTimeout(() => handleDestroy(), 30000); // 30 seconds to read
+      }
+    } catch (error) {
+      console.error("Error incrementing view count:", error);
     }
   };
 
@@ -315,69 +370,54 @@ export default function ViewSecret() {
     // Poll for new messages and participants
     chatPollRef.current = window.setInterval(() => {
       loadChatMessages();
-      updatePresence();
     }, 1000);
     
     loadChatMessages();
-    updatePresence();
   };
 
-  const loadChatMessages = () => {
+  const loadChatMessages = async () => {
     if (!secretId) return;
     
-    const messagesKey = `burnlink_chat_${secretId}`;
-    const stored = localStorage.getItem(messagesKey);
-    if (stored) {
-      const messages: ChatMessage[] = JSON.parse(stored);
-      setChatMessages(messages);
-    }
-
-    // Check if chat was destroyed
-    const secretData = localStorage.getItem(`burnlink_${secretId}`);
-    if (!secretData) {
-      setStatus("destroyed");
-      if (chatPollRef.current) {
-        clearInterval(chatPollRef.current);
-      }
-    } else {
-      const data: SecretData = JSON.parse(secretData);
-      // Check destroy votes
-      const destroyVotes = data.destroyVotes || [];
-      const participants = data.participants || [];
+    try {
+      // Load messages from database
+      const { data: messages, error } = await supabase
+        .from('chat_messages')
+        .select('*')
+        .eq('secret_id', secretId)
+        .order('timestamp', { ascending: true });
       
-      // All participants must vote to destroy
-      if (destroyVotes.length > 0 && destroyVotes.length >= participants.length) {
-        handleDestroy();
+      if (!error && messages) {
+        setChatMessages(messages);
       }
+
+      // Check if chat was destroyed
+      const { data: secretData, error: secretError } = await supabase
+        .from('secrets')
+        .select('*')
+        .eq('id', secretId)
+        .maybeSingle();
+      
+      if (secretError || !secretData || secretData.destroyed_at) {
+        setStatus("destroyed");
+        if (chatPollRef.current) {
+          clearInterval(chatPollRef.current);
+        }
+      } else {
+        // Check destroy votes
+        const destroyVotes = secretData.destroy_votes || [];
+        const participants = secretData.participants || [];
+        
+        // All participants must vote to destroy
+        if (destroyVotes.length > 0 && destroyVotes.length >= participants.length) {
+          handleDestroy();
+        }
+      }
+    } catch (error) {
+      console.error("Error loading chat messages:", error);
     }
   };
 
-  const updatePresence = () => {
-    if (!secretId) return;
-    
-    const presenceKey = `burnlink_presence_${secretId}`;
-    const stored = localStorage.getItem(presenceKey);
-    const presence: Record<string, { name: string; lastSeen: number }> = stored ? JSON.parse(stored) : {};
-    
-    // Update own presence
-    presence[participantId] = {
-      name: getDisplayName(),
-      lastSeen: Date.now()
-    };
-    
-    // Clean up stale presence (>10 seconds old)
-    const now = Date.now();
-    Object.keys(presence).forEach(id => {
-      if (now - presence[id].lastSeen > 10000) {
-        delete presence[id];
-      }
-    });
-    
-    localStorage.setItem(presenceKey, JSON.stringify(presence));
-    setActiveParticipants(Object.keys(presence));
-  };
-
-  const handleDestroy = () => {
+  const handleDestroy = async () => {
     setIsBurning(true);
     if (audioRef.current) {
       audioRef.current.pause();
@@ -385,34 +425,52 @@ export default function ViewSecret() {
     if (chatPollRef.current) {
       clearInterval(chatPollRef.current);
     }
+    
+    try {
+      // Delete from database
+      await supabase.from('chat_messages').delete().eq('secret_id', secretId);
+      await supabase.from('secrets').delete().eq('id', secretId);
+    } catch (error) {
+      console.error("Error destroying secret:", error);
+    }
+    
     setTimeout(() => {
-      localStorage.removeItem(`burnlink_${secretId}`);
-      localStorage.removeItem(`burnlink_chat_${secretId}`);
-      localStorage.removeItem(`burnlink_presence_${secretId}`);
       setStatus("destroyed");
       setIsBurning(false);
     }, 1000);
   };
 
-  const voteToDestroy = () => {
+  const voteToDestroy = async () => {
     if (!secretId || hasVotedDestroy) return;
     
-    const storedData = localStorage.getItem(`burnlink_${secretId}`);
-    if (!storedData) return;
-    
-    const data: SecretData = JSON.parse(storedData);
-    const destroyVotes = data.destroyVotes || [];
-    
-    if (!destroyVotes.includes(participantId)) {
-      destroyVotes.push(participantId);
-      const updatedData = { ...data, destroyVotes };
-      localStorage.setItem(`burnlink_${secretId}`, JSON.stringify(updatedData));
-      setHasVotedDestroy(true);
+    try {
+      const { data, error } = await supabase
+        .from('secrets')
+        .select('destroy_votes, participants')
+        .eq('id', secretId)
+        .maybeSingle();
       
-      toast({
-        title: "Vote recorded",
-        description: `${destroyVotes.length}/${data.participants?.length || 0} votes to destroy`,
-      });
+      if (error || !data) return;
+      
+      const destroyVotes = data.destroy_votes || [];
+      
+      if (!destroyVotes.includes(participantId)) {
+        destroyVotes.push(participantId);
+        
+        await supabase
+          .from('secrets')
+          .update({ destroy_votes: destroyVotes })
+          .eq('id', secretId);
+        
+        setHasVotedDestroy(true);
+        
+        toast({
+          title: "Vote recorded",
+          description: `${destroyVotes.length}/${data.participants?.length || 0} votes to destroy`,
+        });
+      }
+    } catch (error) {
+      console.error("Error voting to destroy:", error);
     }
   };
 
@@ -466,26 +524,26 @@ export default function ViewSecret() {
     setIsPlaying(true);
   };
 
-  const sendChatMessage = () => {
+  const sendChatMessage = async () => {
     if (!chatInput.trim() || !secretId) return;
     
-    const newMessage: ChatMessage = {
+    const newMessage = {
       id: Math.random().toString(36).substr(2, 9),
-      visibleId: participantId.slice(-4),
+      secret_id: secretId,
+      visible_id: participantId.slice(-4),
       text: chatInput,
       sender: participantId,
-      senderName: getDisplayName(),
+      sender_name: getDisplayName(),
       timestamp: Date.now(),
     };
     
-    // Store in shared localStorage
-    const messagesKey = `burnlink_chat_${secretId}`;
-    const stored = localStorage.getItem(messagesKey);
-    const messages: ChatMessage[] = stored ? JSON.parse(stored) : [];
-    messages.push(newMessage);
-    localStorage.setItem(messagesKey, JSON.stringify(messages));
-    
-    setChatInput("");
+    try {
+      // Store in database
+      await supabase.from('chat_messages').insert(newMessage);
+      setChatInput("");
+    } catch (error) {
+      console.error("Error sending message:", error);
+    }
   };
 
   const getFileIcon = (type: string) => {
@@ -512,7 +570,7 @@ export default function ViewSecret() {
   const getTimeRemaining = () => {
     if (!secret) return "";
     const expirationMs = parseExpiration(secret.expiration);
-    const remaining = secret.createdAt + expirationMs - Date.now();
+    const remaining = secret.created_at + expirationMs - Date.now();
     if (remaining <= 0) return "Expired";
     
     const hours = Math.floor(remaining / 3600000);
@@ -641,7 +699,7 @@ export default function ViewSecret() {
                     Participants
                   </span>
                   <span className="font-medium">
-                    {secret.participants?.length || 0}/{secret.viewLimit}
+                    {secret.participants?.length || 0}/{secret.view_limit}
                   </span>
                 </div>
               </div>
@@ -685,12 +743,12 @@ export default function ViewSecret() {
                   </span>
                   <span className="font-medium">
                     {secret.type === "chat" 
-                      ? `${secret.participants?.length || 0}/${secret.viewLimit}`
-                      : secret.viewLimit - secret.viewCount
+                      ? `${secret.participants?.length || 0}/${secret.view_limit}`
+                      : secret.view_limit - secret.view_count
                     }
                   </span>
                 </div>
-                {secret.hasPassword && (
+                {secret.has_password && (
                   <div className="flex items-center justify-between text-sm">
                     <span className="text-muted-foreground flex items-center gap-2">
                       <Lock className="w-4 h-4" />
@@ -962,7 +1020,7 @@ export default function ViewSecret() {
                           : "bg-muted"
                       }`}
                     >
-                      <p className="text-xs opacity-70 mb-1">{msg.senderName}</p>
+                      <p className="text-xs opacity-70 mb-1">{msg.sender_name}</p>
                       <p className="text-sm">{msg.text}</p>
                     </div>
                   ))
