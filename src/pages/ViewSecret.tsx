@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useLocation } from "react-router-dom";
 import { BurnLinkLogo } from "@/components/BurnLinkLogo";
 import { EmberParticles } from "@/components/EmberParticles";
@@ -24,12 +24,14 @@ import {
   VideoIcon,
   FileTextIcon,
   Send,
-  MessageCircle
+  MessageCircle,
+  User,
+  Users
 } from "lucide-react";
 import { importKey, decryptToString, unpackEncrypted } from "@/lib/crypto";
 import { useToast } from "@/hooks/use-toast";
 
-type SecretStatus = "loading" | "ready" | "revealed" | "destroyed" | "expired" | "not-found";
+type SecretStatus = "loading" | "ready" | "revealed" | "destroyed" | "expired" | "not-found" | "chat-full" | "name-entry";
 
 interface SecretData {
   id: string;
@@ -38,10 +40,12 @@ interface SecretData {
   expiration: string;
   viewLimit: number;
   viewCount: number;
+  participants?: string[];
   hasPassword: boolean;
   requireClick: boolean;
   destroyAfterSeconds: number | null;
   createdAt: number;
+  destroyVotes?: string[];
 }
 
 interface FileData {
@@ -58,10 +62,24 @@ interface VoiceData {
 
 interface ChatMessage {
   id: string;
+visibleId: string;
   text: string;
   sender: string;
+  senderName: string;
   timestamp: number;
 }
+
+interface ChatManifest {
+  type: string;
+  roomId: string;
+  created: number;
+  creatorName: string | null;
+}
+
+// Generate unique participant ID
+const generateParticipantId = () => {
+  return `p_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+};
 
 export default function ViewSecret() {
   const { secretId } = useParams();
@@ -79,15 +97,30 @@ export default function ViewSecret() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
-  const [nickname] = useState(() => `User${Math.floor(Math.random() * 9999)}`);
+  const [displayName, setDisplayName] = useState("");
+  const [participantId] = useState(() => generateParticipantId());
+  const [hasVotedDestroy, setHasVotedDestroy] = useState(false);
+  const [activeParticipants, setActiveParticipants] = useState<string[]>([]);
+  const [chatManifest, setChatManifest] = useState<ChatManifest | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const chatPollRef = useRef<number | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
 
   // Get key from URL fragment (never sent to server)
   const keyString = location.hash.slice(1);
 
+  const getDisplayName = useCallback(() => {
+    return displayName || `Anonymous#${participantId.slice(-4)}`;
+  }, [displayName, participantId]);
+
   useEffect(() => {
     loadSecret();
+    return () => {
+      if (chatPollRef.current) {
+        clearInterval(chatPollRef.current);
+      }
+    };
   }, [secretId]);
 
   useEffect(() => {
@@ -98,6 +131,11 @@ export default function ViewSecret() {
       handleDestroy();
     }
   }, [countdown]);
+
+  // Auto-scroll chat
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages]);
 
   const loadSecret = async () => {
     if (!secretId) {
@@ -116,18 +154,29 @@ export default function ViewSecret() {
     try {
       const data: SecretData = JSON.parse(storedData);
       
-      // Check if already destroyed
-      if (data.viewCount >= data.viewLimit) {
-        setStatus("destroyed");
-        return;
-      }
-
-      // Check expiration
+      // Check expiration first
       const expirationMs = parseExpiration(data.expiration);
       if (Date.now() > data.createdAt + expirationMs) {
         setStatus("expired");
         localStorage.removeItem(`burnlink_${secretId}`);
         return;
+      }
+
+      // For chat, check if already a participant or if room is full
+      if (data.type === "chat") {
+        const participants = data.participants || [];
+        const isExistingParticipant = participants.includes(participantId);
+        
+        if (!isExistingParticipant && participants.length >= data.viewLimit) {
+          setStatus("chat-full");
+          return;
+        }
+      } else {
+        // For non-chat secrets, check view limit
+        if (data.viewCount >= data.viewLimit) {
+          setStatus("destroyed");
+          return;
+        }
       }
 
       setSecret(data);
@@ -136,7 +185,12 @@ export default function ViewSecret() {
         setPasswordRequired(true);
       }
       
-      setStatus("ready");
+      // For chat, show name entry first
+      if (data.type === "chat") {
+        setStatus("name-entry");
+      } else {
+        setStatus("ready");
+      }
     } catch (error) {
       console.error("Error loading secret:", error);
       setStatus("not-found");
@@ -153,6 +207,41 @@ export default function ViewSecret() {
       d: 86400000,
     };
     return parseInt(num) * (multipliers[unit] || 3600000);
+  };
+
+  const joinChat = () => {
+    if (!secret) return;
+    
+    // Re-fetch latest data to check current state
+    const storedData = localStorage.getItem(`burnlink_${secretId}`);
+    if (!storedData) {
+      setStatus("not-found");
+      return;
+    }
+
+    const data: SecretData = JSON.parse(storedData);
+    const participants = data.participants || [];
+    
+    // Check if already a participant
+    if (!participants.includes(participantId)) {
+      // Check if room is full
+      if (participants.length >= data.viewLimit) {
+        setStatus("chat-full");
+        return;
+      }
+      
+      // Add as participant
+      const updatedParticipants = [...participants, participantId];
+      const updatedData = { 
+        ...data, 
+        participants: updatedParticipants,
+        viewCount: updatedParticipants.length 
+      };
+      localStorage.setItem(`burnlink_${secretId}`, JSON.stringify(updatedData));
+      setSecret(updatedData);
+    }
+    
+    setStatus("ready");
   };
 
   const handleReveal = async () => {
@@ -173,31 +262,28 @@ export default function ViewSecret() {
       // Handle different content types
       if (secret.type === "message") {
         setDecryptedContent(decrypted);
+        // Update view count for non-chat
+        incrementViewCount();
       } else if (secret.type === "files") {
         const filesData: FileData[] = JSON.parse(decrypted);
         setDecryptedFiles(filesData);
+        incrementViewCount();
       } else if (secret.type === "voice") {
         const voiceData: VoiceData = JSON.parse(decrypted);
         setDecryptedVoice(voiceData);
+        incrementViewCount();
       } else if (secret.type === "chat") {
-        // Initialize chat
+        const manifest: ChatManifest = JSON.parse(decrypted);
+        setChatManifest(manifest);
         setDecryptedContent(decrypted);
+        startChatPolling();
       }
       
       setStatus("revealed");
 
-      // Update view count (demo)
-      const updatedSecret = { ...secret, viewCount: secret.viewCount + 1 };
-      localStorage.setItem(`burnlink_${secretId}`, JSON.stringify(updatedSecret));
-
-      // Start destruction countdown if configured
-      if (secret.destroyAfterSeconds) {
+      // Start destruction countdown if configured (non-chat only)
+      if (secret.type !== "chat" && secret.destroyAfterSeconds) {
         setCountdown(secret.destroyAfterSeconds);
-      }
-
-      // If last view, schedule destruction
-      if (updatedSecret.viewCount >= secret.viewLimit) {
-        setTimeout(() => handleDestroy(), 30000); // 30 seconds to read
       }
     } catch (error) {
       console.error("Decryption error:", error);
@@ -209,16 +295,125 @@ export default function ViewSecret() {
     }
   };
 
+  const incrementViewCount = () => {
+    if (!secret || !secretId) return;
+    
+    const storedData = localStorage.getItem(`burnlink_${secretId}`);
+    if (!storedData) return;
+    
+    const data: SecretData = JSON.parse(storedData);
+    const updatedSecret = { ...data, viewCount: data.viewCount + 1 };
+    localStorage.setItem(`burnlink_${secretId}`, JSON.stringify(updatedSecret));
+    
+    // If last view, schedule destruction
+    if (updatedSecret.viewCount >= secret.viewLimit) {
+      setTimeout(() => handleDestroy(), 30000); // 30 seconds to read
+    }
+  };
+
+  const startChatPolling = () => {
+    // Poll for new messages and participants
+    chatPollRef.current = window.setInterval(() => {
+      loadChatMessages();
+      updatePresence();
+    }, 1000);
+    
+    loadChatMessages();
+    updatePresence();
+  };
+
+  const loadChatMessages = () => {
+    if (!secretId) return;
+    
+    const messagesKey = `burnlink_chat_${secretId}`;
+    const stored = localStorage.getItem(messagesKey);
+    if (stored) {
+      const messages: ChatMessage[] = JSON.parse(stored);
+      setChatMessages(messages);
+    }
+
+    // Check if chat was destroyed
+    const secretData = localStorage.getItem(`burnlink_${secretId}`);
+    if (!secretData) {
+      setStatus("destroyed");
+      if (chatPollRef.current) {
+        clearInterval(chatPollRef.current);
+      }
+    } else {
+      const data: SecretData = JSON.parse(secretData);
+      // Check destroy votes
+      const destroyVotes = data.destroyVotes || [];
+      const participants = data.participants || [];
+      
+      // All participants must vote to destroy
+      if (destroyVotes.length > 0 && destroyVotes.length >= participants.length) {
+        handleDestroy();
+      }
+    }
+  };
+
+  const updatePresence = () => {
+    if (!secretId) return;
+    
+    const presenceKey = `burnlink_presence_${secretId}`;
+    const stored = localStorage.getItem(presenceKey);
+    const presence: Record<string, { name: string; lastSeen: number }> = stored ? JSON.parse(stored) : {};
+    
+    // Update own presence
+    presence[participantId] = {
+      name: getDisplayName(),
+      lastSeen: Date.now()
+    };
+    
+    // Clean up stale presence (>10 seconds old)
+    const now = Date.now();
+    Object.keys(presence).forEach(id => {
+      if (now - presence[id].lastSeen > 10000) {
+        delete presence[id];
+      }
+    });
+    
+    localStorage.setItem(presenceKey, JSON.stringify(presence));
+    setActiveParticipants(Object.keys(presence));
+  };
+
   const handleDestroy = () => {
     setIsBurning(true);
     if (audioRef.current) {
       audioRef.current.pause();
     }
+    if (chatPollRef.current) {
+      clearInterval(chatPollRef.current);
+    }
     setTimeout(() => {
       localStorage.removeItem(`burnlink_${secretId}`);
+      localStorage.removeItem(`burnlink_chat_${secretId}`);
+      localStorage.removeItem(`burnlink_presence_${secretId}`);
       setStatus("destroyed");
       setIsBurning(false);
     }, 1000);
+  };
+
+  const voteToDestroy = () => {
+    if (!secretId || hasVotedDestroy) return;
+    
+    const storedData = localStorage.getItem(`burnlink_${secretId}`);
+    if (!storedData) return;
+    
+    const data: SecretData = JSON.parse(storedData);
+    const destroyVotes = data.destroyVotes || [];
+    
+    if (!destroyVotes.includes(participantId)) {
+      destroyVotes.push(participantId);
+      const updatedData = { ...data, destroyVotes };
+      localStorage.setItem(`burnlink_${secretId}`, JSON.stringify(updatedData));
+      setHasVotedDestroy(true);
+      
+      toast({
+        title: "Vote recorded",
+        description: `${destroyVotes.length}/${data.participants?.length || 0} votes to destroy`,
+      });
+    }
   };
 
   const handleCopy = async () => {
@@ -272,16 +467,24 @@ export default function ViewSecret() {
   };
 
   const sendChatMessage = () => {
-    if (!chatInput.trim()) return;
+    if (!chatInput.trim() || !secretId) return;
     
     const newMessage: ChatMessage = {
       id: Math.random().toString(36).substr(2, 9),
+      visibleId: participantId.slice(-4),
       text: chatInput,
-      sender: nickname,
+      sender: participantId,
+      senderName: getDisplayName(),
       timestamp: Date.now(),
     };
     
-    setChatMessages((prev) => [...prev, newMessage]);
+    // Store in shared localStorage
+    const messagesKey = `burnlink_chat_${secretId}`;
+    const stored = localStorage.getItem(messagesKey);
+    const messages: ChatMessage[] = stored ? JSON.parse(stored) : [];
+    messages.push(newMessage);
+    localStorage.setItem(messagesKey, JSON.stringify(messages));
+    
     setChatInput("");
   };
 
@@ -364,6 +567,18 @@ export default function ViewSecret() {
             </div>
           )}
 
+          {status === "chat-full" && (
+            <div className="glass-card rounded-xl p-8 text-center">
+              <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">
+                <Users className="w-8 h-8 text-muted-foreground" />
+              </div>
+              <h1 className="text-2xl font-bold mb-2">Chat Room Full</h1>
+              <p className="text-muted-foreground">
+                This chat room has reached its maximum number of participants.
+              </p>
+            </div>
+          )}
+
           {status === "destroyed" && (
             <div className="glass-card rounded-xl p-8 text-center">
               <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-destructive/20 flex items-center justify-center animate-ember-pulse">
@@ -385,6 +600,61 @@ export default function ViewSecret() {
               <p className="text-muted-foreground">
                 This secret has expired and been automatically destroyed.
               </p>
+            </div>
+          )}
+
+          {/* Name Entry for Chat */}
+          {status === "name-entry" && secret?.type === "chat" && (
+            <div className="glass-card rounded-xl p-8 space-y-6">
+              <div className="text-center">
+                <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-primary/20 flex items-center justify-center">
+                  <User className="w-8 h-8 text-primary" />
+                </div>
+                <h1 className="text-2xl font-bold mb-2">Join Chat Room</h1>
+                <p className="text-muted-foreground">
+                  Enter a display name or stay anonymous
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="chatName">Display Name (optional)</Label>
+                <Input
+                  id="chatName"
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  placeholder="Leave empty to stay anonymous..."
+                  className="bg-background/50"
+                />
+              </div>
+
+              <div className="space-y-3 p-4 rounded-lg bg-background/50 border border-border/50">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground flex items-center gap-2">
+                    <Clock className="w-4 h-4" />
+                    Expires in
+                  </span>
+                  <span className="font-medium">{getTimeRemaining()}</span>
+                </div>
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground flex items-center gap-2">
+                    <Users className="w-4 h-4" />
+                    Participants
+                  </span>
+                  <span className="font-medium">
+                    {secret.participants?.length || 0}/{secret.viewLimit}
+                  </span>
+                </div>
+              </div>
+
+              <Button
+                onClick={joinChat}
+                variant="ember"
+                size="xl"
+                className="w-full"
+              >
+                <MessageCircle className="w-5 h-5" />
+                {displayName ? `Join as ${displayName}` : "Join Anonymously"}
+              </Button>
             </div>
           )}
 
@@ -411,9 +681,14 @@ export default function ViewSecret() {
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-muted-foreground flex items-center gap-2">
                     <Eye className="w-4 h-4" />
-                    Views remaining
+                    {secret.type === "chat" ? "Participants" : "Views remaining"}
                   </span>
-                  <span className="font-medium">{secret.viewLimit - secret.viewCount}</span>
+                  <span className="font-medium">
+                    {secret.type === "chat" 
+                      ? `${secret.participants?.length || 0}/${secret.viewLimit}`
+                      : secret.viewLimit - secret.viewCount
+                    }
+                  </span>
                 </div>
                 {secret.hasPassword && (
                   <div className="flex items-center justify-between text-sm">
@@ -446,7 +721,10 @@ export default function ViewSecret() {
                   <div>
                     <p className="font-medium text-sm text-destructive">This action is irreversible</p>
                     <p className="text-sm text-muted-foreground">
-                      Once you view this secret, it will be destroyed forever.
+                      {secret.type === "chat" 
+                        ? "This chat requires all participants to agree before destruction."
+                        : "Once you view this secret, it will be destroyed forever."
+                      }
                     </p>
                   </div>
                 </div>
@@ -459,7 +737,7 @@ export default function ViewSecret() {
                 className="w-full"
               >
                 <Flame className="w-5 h-5" />
-                View & Destroy
+                {secret.type === "chat" ? "Enter Chat" : "View & Destroy"}
               </Button>
             </div>
           )}
@@ -660,10 +938,12 @@ export default function ViewSecret() {
               <div className="flex items-center justify-between border-b border-border/50 pb-3">
                 <div>
                   <h3 className="font-semibold">Ephemeral Chat</h3>
-                  <p className="text-xs text-muted-foreground">Messages are E2E encrypted</p>
+                  <p className="text-xs text-muted-foreground">
+                    {activeParticipants.length} online • E2E encrypted
+                  </p>
                 </div>
                 <div className="text-xs text-muted-foreground bg-background/50 px-2 py-1 rounded">
-                  {nickname}
+                  {getDisplayName()}
                 </div>
               </div>
 
@@ -677,16 +957,17 @@ export default function ViewSecret() {
                     <div
                       key={msg.id}
                       className={`p-3 rounded-lg max-w-[80%] ${
-                        msg.sender === nickname
+                        msg.sender === participantId
                           ? "ml-auto bg-primary text-primary-foreground"
                           : "bg-muted"
                       }`}
                     >
-                      <p className="text-xs opacity-70 mb-1">{msg.sender}</p>
+                      <p className="text-xs opacity-70 mb-1">{msg.senderName}</p>
                       <p className="text-sm">{msg.text}</p>
                     </div>
                   ))
                 )}
+                <div ref={messagesEndRef} />
               </div>
 
               <div className="flex gap-2">
@@ -702,15 +983,21 @@ export default function ViewSecret() {
                 </Button>
               </div>
 
-              <Button
-                onClick={handleDestroy}
-                variant="destructive"
-                size="lg"
-                className="w-full"
-              >
-                <Flame className="w-4 h-4" />
-                End & Destroy Chat
-              </Button>
+              <div className="flex gap-2">
+                <Button
+                  onClick={voteToDestroy}
+                  variant="destructive"
+                  size="lg"
+                  className="flex-1"
+                  disabled={hasVotedDestroy}
+                >
+                  <Flame className="w-4 h-4" />
+                  {hasVotedDestroy ? "Vote Recorded" : "Vote to Destroy"}
+                </Button>
+              </div>
+              <p className="text-xs text-center text-muted-foreground">
+                All participants must vote to destroy the chat
+              </p>
             </div>
           )}
         </div>

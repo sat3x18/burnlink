@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { MessageSquare, FileUp, Mic, MessageCircle, Copy, QrCode, Share2, Clock, Eye, Lock, Flame } from "lucide-react";
+import { MessageSquare, FileUp, Mic, MessageCircle, Clock, Eye, Lock, Flame, User } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
@@ -22,7 +22,20 @@ interface SecretOptions {
   requireClick: boolean;
   destroyAfterSeconds: number | null;
   allowManualDestroy: boolean;
+  chatDisplayName: string;
 }
+
+// Helper to convert ArrayBuffer to base64 safely (handles large files)
+const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 8192;
+  let result = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    result += String.fromCharCode.apply(null, Array.from(chunk));
+  }
+  return btoa(result);
+};
 
 export function CreateSecretForm() {
   const [secretType, setSecretType] = useState<SecretType>("message");
@@ -38,6 +51,7 @@ export function CreateSecretForm() {
     requireClick: true,
     destroyAfterSeconds: null,
     allowManualDestroy: true,
+    chatDisplayName: "",
   });
   const { toast } = useToast();
 
@@ -102,11 +116,11 @@ export function CreateSecretForm() {
         const { ciphertext, iv } = await encrypt(message, key);
         encryptedPayload = packEncrypted(iv, ciphertext);
       } else if (secretType === "files") {
-        // Encrypt files with their data as base64
+        // Encrypt files with their data as base64 (fixed for large files)
         const filesWithData = await Promise.all(
           files.map(async (f) => {
             const arrayBuffer = await f.arrayBuffer();
-            const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+            const base64 = arrayBufferToBase64(arrayBuffer);
             return { name: f.name, size: f.size, type: f.type, data: base64 };
           })
         );
@@ -114,18 +128,28 @@ export function CreateSecretForm() {
         const { ciphertext, iv } = await encrypt(manifest, key);
         encryptedPayload = packEncrypted(iv, ciphertext);
       } else if (secretType === "voice") {
-        // Encrypt voice as base64
+        // Encrypt voice as base64 (fixed for large recordings)
         const arrayBuffer = await voiceBlob!.arrayBuffer();
-        const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+        const base64 = arrayBufferToBase64(arrayBuffer);
         const voiceData = JSON.stringify({ audio: base64, type: voiceBlob!.type });
         const { ciphertext, iv } = await encrypt(voiceData, key);
         encryptedPayload = packEncrypted(iv, ciphertext);
       } else {
-        // Chat invite
-        const chatManifest = JSON.stringify({ type: "chat", roomId: secretId, created: Date.now() });
+        // Chat invite - minimum 2 participants
+        const chatManifest = JSON.stringify({ 
+          type: "chat", 
+          roomId: secretId, 
+          created: Date.now(),
+          creatorName: options.chatDisplayName || null
+        });
         const { ciphertext, iv } = await encrypt(chatManifest, key);
         encryptedPayload = packEncrypted(iv, ciphertext);
       }
+
+      // For chat, minimum view limit is 2
+      const effectiveViewLimit = secretType === "chat" 
+        ? Math.max(2, options.viewLimit) 
+        : options.viewLimit;
 
       // In production, this would be sent to the server
       // For now, we'll simulate with local storage (demo only)
@@ -134,12 +158,14 @@ export function CreateSecretForm() {
         type: secretType,
         encryptedPayload,
         expiration: options.expiration,
-        viewLimit: options.viewLimit,
+        viewLimit: effectiveViewLimit,
         viewCount: 0,
+        participants: [] as string[], // Track chat participants
         hasPassword: !!options.password,
         requireClick: options.requireClick,
         destroyAfterSeconds: options.destroyAfterSeconds,
         createdAt: Date.now(),
+        destroyVotes: [] as string[], // For consensus-based destruction
       };
 
       // Store encrypted data (demo - would be API call)
@@ -177,6 +203,7 @@ export function CreateSecretForm() {
       requireClick: true,
       destroyAfterSeconds: null,
       allowManualDestroy: true,
+      chatDisplayName: "",
     });
   };
 
@@ -232,12 +259,32 @@ export function CreateSecretForm() {
         )}
 
         {secretType === "chat" && (
-          <div className="text-center py-8">
-            <MessageCircle className="w-16 h-16 mx-auto mb-4 text-primary opacity-70" />
-            <h3 className="text-lg font-semibold mb-2">Ephemeral Chat Room</h3>
-            <p className="text-muted-foreground max-w-md mx-auto">
-              Create a temporary chat room. All messages are end-to-end encrypted and will be destroyed based on your settings.
-            </p>
+          <div className="space-y-6">
+            <div className="text-center py-4">
+              <MessageCircle className="w-16 h-16 mx-auto mb-4 text-primary opacity-70" />
+              <h3 className="text-lg font-semibold mb-2">Ephemeral Chat Room</h3>
+              <p className="text-muted-foreground max-w-md mx-auto">
+                Create a temporary chat room. All messages are end-to-end encrypted and will be destroyed based on your settings.
+              </p>
+            </div>
+            
+            {/* Display Name Option */}
+            <div className="space-y-2">
+              <Label htmlFor="displayName" className="text-sm flex items-center gap-2">
+                <User className="w-4 h-4 text-muted-foreground" />
+                Your display name (optional)
+              </Label>
+              <Input
+                id="displayName"
+                value={options.chatDisplayName}
+                onChange={(e) => setOptions({ ...options, chatDisplayName: e.target.value })}
+                placeholder="Leave empty to stay anonymous..."
+                className="bg-background/50"
+              />
+              <p className="text-xs text-muted-foreground">
+                If empty, you'll appear as "Anonymous" with a random ID
+              </p>
+            </div>
           </div>
         )}
 
@@ -274,7 +321,7 @@ export function CreateSecretForm() {
             <div className="space-y-2">
               <Label className="text-sm flex items-center gap-2">
                 <Eye className="w-4 h-4 text-muted-foreground" />
-                View limit
+                {secretType === "chat" ? "Max participants" : "View limit"}
               </Label>
               <Select
                 value={options.viewLimit.toString()}
@@ -284,9 +331,9 @@ export function CreateSecretForm() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {[1, 2, 3, 5, 10].map((num) => (
+                  {(secretType === "chat" ? [2, 3, 5, 10] : [1, 2, 3, 5, 10]).map((num) => (
                     <SelectItem key={num} value={num.toString()}>
-                      {num} {num === 1 ? "view" : "views"}
+                      {num} {secretType === "chat" ? "participants" : (num === 1 ? "view" : "views")}
                     </SelectItem>
                   ))}
                 </SelectContent>
