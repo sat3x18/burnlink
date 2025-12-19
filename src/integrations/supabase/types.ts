@@ -14,7 +14,92 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      chat_messages: {
+        Row: {
+          id: string
+          secret_id: string
+          sender: string
+          sender_name: string
+          text: string
+          timestamp: number
+          visible_id: string
+        }
+        Insert: {
+          id: string
+          secret_id: string
+          sender: string
+          sender_name: string
+          text: string
+          timestamp: number
+          visible_id: string
+        }
+        Update: {
+          id?: string
+          secret_id?: string
+          sender?: string
+          sender_name?: string
+          text?: string
+          timestamp?: number
+          visible_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "chat_messages_secret_id_fkey"
+            columns: ["secret_id"]
+            isOneToOne: false
+            referencedRelation: "secrets"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      secrets: {
+        Row: {
+          created_at: number
+          destroy_after_seconds: number | null
+          destroy_votes: string[] | null
+          destroyed_at: number | null
+          encrypted_payload: string
+          expiration: string
+          has_password: boolean
+          id: string
+          participants: string[] | null
+          require_click: boolean
+          type: string
+          view_count: number
+          view_limit: number
+        }
+        Insert: {
+          created_at?: number
+          destroy_after_seconds?: number | null
+          destroy_votes?: string[] | null
+          destroyed_at?: number | null
+          encrypted_payload: string
+          expiration: string
+          has_password?: boolean
+          id: string
+          participants?: string[] | null
+          require_click?: boolean
+          type: string
+          view_count?: number
+          view_limit?: number
+        }
+        Update: {
+          created_at?: number
+          destroy_after_seconds?: number | null
+          destroy_votes?: string[] | null
+          destroyed_at?: number | null
+          encrypted_payload?: string
+          expiration?: string
+          has_password?: boolean
+          id?: string
+          participants?: string[] | null
+          require_click?: boolean
+          type?: string
+          view_count?: number
+          view_limit?: number
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
