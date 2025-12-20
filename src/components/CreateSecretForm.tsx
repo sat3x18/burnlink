@@ -10,9 +10,9 @@ import { SecretTypeCard } from "./SecretTypeCard";
 import { FileUploader } from "./FileUploader";
 import { VoiceRecorder } from "./VoiceRecorder";
 import { SecretLinkDisplay } from "./SecretLinkDisplay";
-import { generateKey, exportKey, encrypt, packEncrypted, generateSecureId } from "@/lib/crypto";
+import { generateKey, exportKey, encrypt, packEncrypted } from "@/lib/crypto";
 import { useToast } from "@/hooks/use-toast";
-import { supabase } from "@/integrations/supabase/client";
+import { createSecret } from "@/lib/api";
 
 type SecretType = "message" | "files" | "voice" | "chat";
 
@@ -106,9 +106,6 @@ export function CreateSecretForm() {
       // Generate encryption key
       const key = await generateKey();
       const keyString = await exportKey(key);
-      
-      // Generate secure ID
-      const secretId = generateSecureId();
 
       // Encrypt content based on type
       let encryptedPayload: string;
@@ -136,10 +133,10 @@ export function CreateSecretForm() {
         const { ciphertext, iv } = await encrypt(voiceData, key);
         encryptedPayload = packEncrypted(iv, ciphertext);
       } else {
-        // Chat invite - minimum 2 participants
+        // Chat invite - uses a placeholder roomId, will be replaced by server-generated ID
         const chatManifest = JSON.stringify({ 
           type: "chat", 
-          roomId: secretId, 
+          roomId: "pending", 
           created: Date.now(),
           creatorName: options.chatDisplayName || null
         });
@@ -147,31 +144,16 @@ export function CreateSecretForm() {
         encryptedPayload = packEncrypted(iv, ciphertext);
       }
 
-      // For chat, minimum view limit is 2
-      const effectiveViewLimit = secretType === "chat" 
-        ? Math.max(2, options.viewLimit) 
-        : options.viewLimit;
-
-      // Store encrypted data in database
-      const { error } = await supabase.from('secrets').insert({
-        id: secretId,
+      // Store encrypted data via edge function API
+      const { id: secretId } = await createSecret({
         type: secretType,
         encrypted_payload: encryptedPayload,
         expiration: options.expiration,
-        view_limit: effectiveViewLimit,
-        view_count: 0,
-        participants: [],
+        view_limit: options.viewLimit,
         has_password: !!options.password,
         require_click: options.requireClick,
         destroy_after_seconds: options.destroyAfterSeconds,
-        created_at: Date.now(),
-        destroy_votes: [],
       });
-
-      if (error) {
-        console.error("Database error:", error);
-        throw new Error("Failed to store secret");
-      }
 
       // Generate link with key in fragment (never sent to server)
       const link = `${window.location.origin}/view/${secretId}#${keyString}`;
